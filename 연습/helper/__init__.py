@@ -3,14 +3,16 @@ from matplotlib import font_manager as fm
 from matplotlib import pyplot as plt
 import glob as gl
 from pathlib import Path
+
 # ------------------------------
 # 묘듈 불러오기
 # ------------------------------
-from . import my_qtcheck
-from . import my_plot
-from . import my_stats
-from . import my_prep
-from . import my_ols
+from . import my_qtcheck    # 데이터 품질 점검 관련 함수 모듈
+from . import my_plot       # 시각화 관련 함수 모듈
+from . import my_stats      # 통계 분석 관련 함수 모듈
+from . import my_prep       # 데이터 전처리 관련 함수 모듈
+from . import my_ols        # 선형회귀 관련 함수 모듈
+from . import my_logit      # 로지스틱 회귀 관련 함수 모듈
 # ------------------------------
 # 한글 폰트 설정
 # ------------------------------
