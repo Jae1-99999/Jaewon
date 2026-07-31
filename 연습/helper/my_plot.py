@@ -542,7 +542,7 @@ def pairplot(data, x=None, y=None, hue=None, palette=None, diag_kind="kde", reg=
 # -------------------------------------------
 # Point Plot 모듈
 # -------------------------------------------
-def pointplot(data, x = None, y = None, hue = None, errorbar='se', title=None, 
+def pointplot(data, x = None, y = None, hue = None, errorbar='se', title=None, xlabel=None, ylabel=None,
               width= 1280, height=640, color=None, markers="o", estimator="mean", linestyles="-",
               hue_order= None, legend_title=None, palette=None, dodge=False, 
               capsize=0.1, order=None, ax=None, save_path=None):

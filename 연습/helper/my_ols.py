@@ -10,7 +10,7 @@ from IPython.display import display, Markdown
 from . import my_plot, my_stats, my_prep, my_qtcheck
 import os
 from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error
-
+from . import my_logit
 # -------------------------------------------------------
 # 선형 회귀 모델 적합 함수
 # -------------------------------------------------------
@@ -1422,4 +1422,73 @@ def report_model(fit, title=True, plot=True):
     heading("#### 4) 독립성 검정")
     test_independent(fit)
 
+# ----------------------------------------------------------------------------
+# 로지스틱 회귀모형 적합 + 후진 소거 자동처리 + 결과보고 자동화 함수
+# ----------------------------------------------------------------------------
+def auto_logit(data, y, report=True, plot=True, threshold=0.5, width=1280,
+               height=640, backward=False, alpha=0.5):
+    """로지스틱 회귀모델 적합부터 변수 선택·보고서 출력·시각화까지 한번에 수행한다.
+    
+    'backward=True'이면 유의하지 않은 독립변수가 모두 사라질 때까지 후진소거법
+    (유의확률이 가장 큰 변수를 하나씩 제거 후 재적합)을 반복한다.
+    
+    Args:
+        data: 독립변수와 종속변수를 모두 포함하는 데이터프레임.
+        y : 종속변수로 사용할 컬럼명 (0/1 이분형)
+        report (bool) : 오즈비 보고표·모형 적합도·해석 문장 출력 여부 (기본값: True)
+        plot (bool) : 시각화 출력 여부 (기본값: True)
+        threshold (float) : 시그모이드 곡선에 표시할 분류 임계값 (기본값 : 0.5)
+        width (int) : 그래프 너비 (기본값: 1280)
+        height (int) : 그래프 높이 (기본값: 640)
+        backward (bool) : 후진소거법으로 유의하지 않은 독립변수를 제거할지 여부 (기본값: False)
+        alpha (float) : 후진소거법의 변수 제거 기준이자 해석 문장의 유의수준 (기본값 : 0.05)
+        
+    Returns:
+        적합이 완료된 로지스틱 회귀분석 결과 객체.
+    """
+
+    # 1) 모델 적합 (backward=True이면 유의하지 않은 변수가 없어질 때까지 반복)
+    # 빈줄 출력
+    print()
+
+    while True:
+        fit = fit_model(data, y)
+
+        if not backward:
+            break       # 후진소거법이 아니면 반복문 종료
+
+        pvalues = report_variables(fit, data)["유의확률"]
+
+        # 종료 조건 : 독립변수가 하나뿐이거나 남은 변수가 모두 유의한 경우
+        if len(pvalues) <= 1 or pvalues.max() < alpha:
+            break
+
+        # 유의확률이 가장 큰(=가장 유의하지 않은) 독립변수를 하나만 제거한다.
+        # 여러 개를 한꺼번에 지우면, 변수 간 상관 때문에 원래는 유의해졌을 변수까지 사라진다.
+        worst = report_variables(fit, data).loc[pvalues.idxmax(), "독립변수"]
+        print(f"유의하지 않은 독립변수 제거 → {worst} (p = {pvalues.max():.4f})")
+        data = data.drop(colums=[worst])
+
+
+    # 2) 모형 적합도 독립변수 보고
+    if report:
+        display(Markdown("#### ▶ 모형 적합도"))
+
+        # 모형 적합도 해설
+        display(Markdown(report_fitness(fit)))
+
+        display(Markdown("#### ▶ 독립변수 보고"))
+        # 오즈비 보고 표
+        display(report_variables(fit, data))
+
+        # 변수별 해석
+        display(Markdown(report_variables_text(fit, data=data, alpha=alpha)))
+
+    # 3) 시각화
+    if plot:
+        display(Markdown("#### ▶ 오즈비 시각화"))
+        my_logit.plot_odds(fit, data, width=width)
+
+    # 4) 최종 적합 모델 객체 반환
+    return fit
 
