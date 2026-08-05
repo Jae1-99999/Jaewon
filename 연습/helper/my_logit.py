@@ -3,9 +3,10 @@ import seaborn as sb
 from pandas import DataFrame
 from statsmodels.api import add_constant, Logit
 from IPython.display import display, Markdown
-
+from sklearn.metrics import confusion_matrix, roc_curve, roc_auc_score, accuracy_score, recall_score, precision_score, f1_score
 from . import my_plot
 from . import my_stats
+from statsmodels.stats.stattools import durbin_watson
 # --------------------------------------------------------------
 
 
@@ -477,3 +478,524 @@ def auto_logit(data, y, report=True, plot=True, threshold=0.5, width=1280,
     # 4) 최종 적합 모델 객체 반환
     return fit
 
+# ---------------------------------------------------------------
+# 혼동행렬 시각화 함수 정의
+# ---------------------------------------------------------------
+def plot_confusion(fit, threshold=0.5, palette=None, title=None, size=640, save_path=None, ax=None):
+    """혼동행렬(Confusion Matrix)을 정사각형 히트맵으로 시각화한다.
+    
+    Args:
+        fit: 'fit_model' 함수로 적합된 회귀분석 결과 객체.
+        threshold (float): 확률을 0/1로 분류하는 임계값 (기본값: 0.5)
+        palette (str) : 히트맵 색상 팔레트 이름 (기본값: None → "Blues")
+        title (str) : 그래프 제목 (기본값 : None → "혼동행렬(Confusion Matrix)")
+        size (int) : 캔버스 한 변의 픽셀 크기. 가로·세로가 같다 (기본값: 640)
+        save_path (str) : 이미지 저장 경로 (기본값 : None)
+        ax: 그래프를 그릴 Axes 객체 (기본값: None → 캔버스를 새로 생성)
+    """
+
+    # 1) 실제값과 임계값 기준 예측 범주로 혼동행렬 구성
+    y_true = np.asarray(fit.model.endog).astype(int)
+    y_pred = (np.asarray(fit.predict()) > threshold).astype(int)
+    cm = confusion_matrix(y_true, y_pred)
+
+    cmdf = DataFrame(cm,
+                     index=["실제 0 (Negative)", "실제 1 (Positive)"],
+                     columns=["예측 0 (Negative)", "실제 1 (Positive)"])
+    
+    # 2) 시각화
+    # ax를 넘겨 받으면 서브플롯의 한 칸에 그리고, 없으면 단독 캔버스를 만든다
+    fig = None
+    if ax is None:
+        fig, ax = my_plot.init(width=size, height=size)
+
+    ax.set_title(title if title else "혼동행렬(Confusion Matrix)",
+                 fontsize=24, fontweight=500, pad=15)
+
+    # square=True로 셀을 정사각형으로 맞추고, 값이 표기되므로 색상막대(cbar)는 생략한다
+    # 빈도(점수)를 그대로 표기하도록 fmt="d"사용
+    my_plot.heatmap(data=cmdf, annot=True, fmt="d",
+                    palette=palette if palette else "Blues",
+                    annot_kws={"size": size*0.07},       # 글자크기를 그래프 크기의 7%로 설정
+                    square=True, cbar=False, ax=ax)
+
+    if fig is not None:
+        my_plot.show(save_path=save_path)
+
+
+# --------------------------------------------------------------
+# ROC 곡선 시각화 함수 정의
+# --------------------------------------------------------------
+def plot_roc(fit, palette=None, title=None, size=640, save_path=None, ax=None):
+    """ROC Curve를 정사각형으로 그리고 AUC(곡선 아래 면적)를 제목에 표시한다.
+    
+    Args:
+        fit: 'fit_model' 함수로 적합된 회귀분석 결과 객체
+        palette (str) : 곡선 색상에 사용할 팔레트 이름 (기본값: None → 파랑 단색)
+        title (str) : 그래프 제목 (기본값: None → "ROC Curve (AUC = ...)")
+        size (int) : 캔버스 한 변의 픽셀 크기. 가로·세로가 같다 (기본값: 640)
+        save_path (str) : 이미지 저장 경로 (기본값: None)
+        ax : 그래프를 그릴 Axes 객체 (기본값: None → 캔버스를 새로 생성)
+    """
+
+    # 1) 예측 확률로 ROC 좌표와 AUC 계산
+    y_true = np.asarray(fit.model.endog).astype(int)        # 실제 종속변수 값
+    proba = np.asarray(fit.predict())                       # 모델의 예측값 --> 1이 될 확률
+    auc = roc_auc_score(y_true, proba)                      # AUC 계산
+    roc_fpr, roc_tpr, _ = roc_curve(y_true, proba)          # ROC 좌표 (FPR, TPR, 임계값)
+
+    # 2) 시각화 초기화
+    line_color = sb.color_palette(palette)[0] if palette else "#328cc1"
+
+    fig = None
+    if ax is None:
+        fig, ax = my_plot.init(width=size, height=size)
+
+    # x축=위양성률(FPR), y축=재현율(TPR)    ← ROC의 표준 축 배치
+    ax.set_title(title if title else f"ROC Curve (AUC = {auc:.4f})",
+                 fontsize=24, fontweight=500, pad=15)
+    ax.set_xlabel("위양성률(FPR, 1 - 특이성)", fontsize=16, fontweight=400, labelpad=5)
+    ax.set_ylabel("재현율(TPR, 민감도)", fontsize=16, fontweight=400, labelpad=5)
+
+    # 3) ROC 곡선과 기준선 그리기
+    my_plot.lineplot(x=roc_fpr, y=roc_tpr, color=line_color, ax=ax)
+
+    # 무작위로 찍었을 때의 기준선(대각선)
+    my_plot.lineplot(x=[0, 1], y=[0, 1], color="red", linestyle="--", ax=ax)
+
+    # x·y 모두 0~1 범위이므로 축비율을 1:1로 맞추면 그래프 영역이 정사각형이 된다
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_aspect("equal")
+
+    if fig is not None:
+        my_plot.show(save_path=save_path)
+
+# -------------------------------------------------------------------
+# 분류 성능 평가 함수 정의
+# -------------------------------------------------------------------
+def report_performance(fit, threshold=0.5, plot=True, palette=None, size=640, save_path=None):
+    """적합된 로지스틱 모델의 분류 성능을 혼동행렬과 평가지표로 정리해 출력한다.
+    
+    위양성률(FPR)과 특이성(TNR)은 sklearn에 함수가 없어 혼동행렬로 직접 계산한다.
+    
+    Args:
+        fit: 'fit_model' 함수로 적합된 회귀분석 결과 객체
+        threshold (float) : 확률을 0/1로 분류하는 임계값 (기본값: 0.5)
+        plot (bool) : 혼동행렬 히트맵과 ROC Curve를 함께 그릴지 여부 (기본값: True)
+        palette (str) : 그래프 색상에 사용할 팔레트 이름 (기본값: None)
+        size (int) : 서브플롯 한 칸의 한 번 픽셀 크기 (기본값: 640)
+        save_path (str) : 이미지 저장 경로 (기본값: None)
+    """
+
+    # 1) 실제값·예측확률·예측범주 준비
+    y_true = np.asarray(fit.model.endog).astype(int)    # 실제 종속변수(0/1)
+    proba = np.asarray(fit.predict())                   # 1이 될 확률
+    y_pred = (proba > threshold).astype(int)            # 임계값 기준 예측 범주(0/1)
+
+    # 2) 혼동행렬 및 TN/FP/FN/TP 분해
+    cm = confusion_matrix(y_true, y_pred)
+    tn, fp, fn, tp = cm.ravel()
+    
+    # 3) 평가지표 계산
+    fallout = fp / (fp + tn) if (fp + tn) > 0 else 0.0      # 위양성률(FPR)
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0  # 특이성(TNR = 1- FPR)
+
+    auc = roc_auc_score(y_true, proba)
+
+    if auc < 0.6:
+        auc_grade = "모형이 아무 것도 학습하지 못함"
+    elif auc < 0.7:
+        auc_grade = "낮음"
+    elif auc < 0.8:
+        auc_grade = "쓸만함"
+    elif auc < 0.9:
+        auc_grade = "우수"
+    else:
+        auc_grade = "매우 우수"
+
+    # 진단 오즈비 (TPxTN)/(FPxFN). 오분류가 하나도 없으면 분모가 0이므로 무한대로 둔다
+    if fp * fn > 0:
+        dor = (tp * tn) / (fp * fn)
+    else:
+        dor = np.inf
+
+    # 4) 평가표 구성
+    metrics = DataFrame([{
+        "정확도(Accuracy)" : accuracy_score(y_true, y_pred),
+        "정밀도(Precision)" : precision_score(y_true, y_pred, zero_division=0),
+        "재현율(Recall, TPR)" : recall_score(y_true, y_pred, zero_division=0),
+        "위양성율(Fallout,FPR)" : fallout,
+        "특이성(Specificity, TNR)" : specificity,
+        "F1" : f1_score(y_true, y_pred, zero_division=0),
+        "AUC" : auc,
+        "AUC 판단" : auc_grade,
+        "진단오즈비(DOR)" : dor,
+    }], index=["performance"])
+
+    # 5) 혼동행렬
+    cmdf = DataFrame(cm,
+                     index=["실제 0 (Negative)", "실제 1 (Positive)"],
+                     columns=["예측 0 (Negative)", "예측 1 (Positive)"])
+    
+    # 6) 결과 출력
+    display(cmdf)
+    display(metrics)
+
+    # 7) 시각화: 혼동행렬 히트맵 + ROC Curve를 1행 2열로 나란히 배치
+    if plot:
+        fig, ax = my_plot.init(width=size, height=size, rows=1, cols=2)
+        plot_confusion(fit, threshold=threshold, palette=palette, ax=ax[0])
+        plot_roc(fit, palette=palette, ax=ax[1])
+        my_plot.show(save_path=save_path)
+
+# ---------------------------------------------------------------
+# 로짓 선형성 점검 함수 정의
+# ---------------------------------------------------------------
+def test_linear(fit=None, data=None, yname=None, xnames=None, targets=None, alpha=0.05):
+    """Box-Tidwell 검정으로 연속형 독립변수의 로짓 선형성을 점검한다.
+    
+    독립변수 x에 'x × ln(x)' 항을 하나씩 추가해 그 항이 유의한지 본다.
+    유의하면(p < alpha) 로짓이 직선이 아니라는 뜻이므로 변환·제곱항·구간화가 필요하다.
+    이분형(더미) 변수는 두 점을 잇는 선이 언제나 직선이므로 검정 대상에서 제외한다.
+    
+    Args:
+        fit: 'fit-model' 함수로 적합된 회귀분석 결과 객체
+        data: 회귀분석에 사용한 원본 데이터프레임. 독립변수와 종속변수를 모두 포함해야 한다.
+        alpha (float) : 유의수준 (기본값 : 0.05)
+        yname (str) : 종속변수 컬럼명
+        xnames (list) : 모델에 투입된 독립변수 이름 목록
+        targets (list) : 검정할 변수 목록. None이면 'xnames' 중 연속형 전체 (기본값:None)
+        
+    """
+    # 1) 검정 대상 결정 (상수항 제외, 연속형만)
+    if yname is None:
+        yname = fit.model.endog_names
+
+    if xnames is None:
+        xnames = []
+        for name in fit.model.exog_names:
+            if name != "const":
+                xnames.append(name)
+
+    if targets is None:
+        targets = []
+        for x in xnames:
+            # 값의 종류가 3가지 이상인 변수만 연속형으로 간주한다
+            if data[x].nunique() > 2:
+                targets.append(x)
+
+    # 2) Box-Tidwell 검정 (변수마다 x*ln(x) 항을 하나씩 추가)
+    rows = []
+    for x in targets:
+        bt_data = data[xnames].copy()       # 독립변수만 복사
+        base = bt_data[x]                   # 원본 독립변수 값
+
+        # 최소값이 0 이하이면 ln 정의역(양수)을 맞추기 위해 평행이동 필요
+        shifted = bool(base.min() <= 0)
+        if shifted:
+            base = base - base.min() + 1
+
+        # Box-Tidwell 항 생성: x * ln(x)
+        bt_data["_bt_term"] = base * np.log(base)
+
+        # Logit 모델 적합 후 Box-Tidwell 항의 z·p값으로 선형성 판정
+        bt_fit = Logit(data[yname], add_constant(bt_data)).fit(disp=0)
+        z = float(bt_fit.tvalues["_bt_term"])
+        p = float(bt_fit.pvalues["_bt_term"])
+        linearity = bool(p >= alpha)
+
+        # 선형성 판정에 따라 결론 문구를 달리한다
+        if linearity:
+            conclusion = "귀무가설 채택 → 로짓 선형성 위배 근거 없음"
+        else:
+            conclusion = "대립가설 채택 → 로짓 선형성 위배(변환 필요)"
+
+        # 독립변수별 결과를 딕셔너리로 정리해 리스트에 추가
+        rows.append({
+            "z" : round(z, 4),
+            "p-value" : round(p, 4),
+            "linearity" : linearity,
+            "위치이동" : shifted,
+            "result" : conclusion,
+            "독립변수" : x,
+        })
+
+    # 결과표 생성 및 출력
+    result_df = DataFrame(rows).set_index("독립변수")
+    #display(result_df)
+    return result_df
+
+# ----------------------------------------------------------------
+# 로짓 선형성 위배 처방 함수 정의
+# ----------------------------------------------------------------
+def fix_linear(data, y, alpha=0.05, allow_shifted_log=False, max_rounds=None, report=True):
+    """로짓 선형성 위배를 한 변수씩 처방하고 재 검정하는 루프를 자동으로 수행한다.
+    
+    Args:
+        data: 독립변수 0/1 종속변수를 모두 포함한 데이터프레임
+        y (str) : 종속변수 컬럼명
+        alpha (float) : 유의수준 (기본값: 0.05)
+        allow_shifted_log (bool) : 음수를 포함한 변수도 평행이동 후 로그 변환을 시도할지 여부
+            이동량이 자의적이어서 계수 해석이 무너지므로 기본값은 False (기본값: False)
+        max_rounds (int) : 최대 반복 횟수. None이면 연속형 독립변수 개수 (기본값: None)
+        report (bool) : 라운드별 진행 상황과 처리 이력표를 출력할지 여부 (기본값: True)
+        
+    Returns:
+        처방이 모두 반영된 회귀분석 결과 객체. 아래 속성이 함께 붙는다.
+            - 'data_' (DataFrame) : 파생변수가 반영된 데이터프레임
+            - 'recipe_' (dict) : 변수별 처방 내역. 'apply_recipe'에 그대로 넘겨 쓴다
+            - 'history_' (DataFrame) : 라운드별 처리 이력표
+            - 'inresolved_' (list) : 제곱항·로그변환으로도 해소되지 않은 변수 목록
+            
+    Raises:
+        KeyError : 종속변수 컬럼이 'data'에 없는 경우
+        ValueError : alpha·max_rounds가 유효하지 않은 경우
+    """
+
+    # 1) 입력검증
+    if y not in data.columns:
+        raise KeyError(f"종속변수 컬럼이 없습니다: '{y}'")
+
+    if not 0 < alpha < 1:
+        raise ValueError(f"alpha는 0과 1 사이여야 합니다: {alpha}")
+
+    if max_rounds is not None and max_rounds < 1:
+        raise ValueError(f"max_rounds는 1 이상이어야 합니다: {max_rounds}")
+    
+    # 2) 초기 상태 준비
+    tmp = data.copy()
+    fit = fit_model(tmp, y=y)           # 기준선 모형
+
+    # 아직 처방하지 않은 연속형 독립변수 (이분형은 언제나 직선이므로 제외)
+    pending = []
+    for x in fit.model.exog_names:
+        if x != "const" and tmp[x].nunique() > 2:
+            pending.append(x)
+
+    if max_rounds is None:          # max_rounds가 지정되지 않으면
+        max_rounds = len(pending)   # 연속형 독립변수 개수만큼 반복한다
+
+    recipe = {}         # 확정된 처방
+    unresolved = []     # 처방으로 해소하지 못한 변수
+    history = []        # 라운드별 이력
+
+    # 3) 진단 → 처방 → 검증 → 재진단 루프
+    for rnd in range(1, max_rounds + 1):
+        # 3-1) 진단 : 아직 손대지 않은 변수만 다시 검정
+        # 이미 처방한 변수를 다시 넣으면 짝이 되는 제곱항 때문에 판정이 무의미하다.
+        targets = [x for x in pending if x not in unresolved]
+
+        if not targets:
+            break
+
+        bt = test_linear(fit, data=tmp, yname=y, targets=targets, alpha=alpha)
+
+        violated = bt[~bt["linearity"]]
+
+        if violated.empty:
+            if report:
+                print(f"[라운드 {rnd}] 위배 변수 없음 → 루프종료")
+            break
+
+        # 3-2) 위배가 가장 심한 변수 하나를 고른다
+        target = violated["z"].abs().idxmax()
+
+        if report:
+            print(f"[라운드 {rnd}] 위배 {len(violated)}종 →"
+                  f"'{target}' 처방 (z = {violated.loc[target, 'z']})")
+            
+        # 3-3) 처방 ①: 중심화 후 제곱항 추가
+        center = float(tmp[target].mean())
+
+        sq_data = tmp.copy()
+        sq_data[target + "_c"] = sq_data[target] - center
+        sq_data[target + "_c2"] = sq_data[target] ** 2
+        sq_data = sq_data.drop(columns=[target])
+
+        # 적합이 실패하면 제곱항은 후보에서 탈락시킨다
+        try:
+            sq_fit = fit_model(sq_data, y=y)
+
+            # 검증 : 제곱항 자체가 유의한가 + 우도비 검정이 개선을 지지하는가
+            sq_p = float(sq_fit.pvalues[target + "_c2"])
+            lr_stat = 2 * (sq_fit.llf - fit.llf)
+            lr_p = float(1 - chi2.cdf(lr_stat, 1))  # 늘어난 모수는 제곱항 1개
+            sq_ok = bool(sq_p < alpha and lr_p < alpha)
+        except Exception:
+            sq_fit, sq_p, lr_p, sq_ok = None, np.nan, np.nanm False
+
+
+        # 3-4) 처방 ②: 로그 변환
+        # 최솟값이 0이하이면 ln 정의역을 맞추기 위해 평행이동해야 하는데,
+        # 이동량이 자의적이여서 계수 해석이 무너지므로 기본값에서는 시도하지 않는다
+        min_value = float(tmp[target].min())
+        shift = 0.0 if min_value > 0 else -min_value + 1.0
+
+        log_fit, log_ok = None, False
+
+        if min_value > 0 or allow_shifted_log:
+            log_data = tmp.copy()
+            log_data[target + "_log"] = np.log(log_data[target] + shift)
+            log_data = log_data.drop(columns=[target])
+
+            try:
+                log_fit = fit_model(log_data, y=y)
+
+                # 검증 : 로그 변환은 모수가 늘지 않으므로 우도비 검정을 쓸 수 없다.
+                # 대신 AIC가 좋아졌고 그 변수의 선형성이 회복되었는지로 판정한다
+                aic_better = bool(log_fit.aic < fit.aic)
+
+                log_bt = test_linear(log_fit, data=log_data, yname=y, targets=[target + "_log"], alpha=alpha)
+                log_linear = bool(log_bt.loc[target + "_log", "linearity"])
+                log_ok = bool(aic_better and log_linear)
+            except Exception:
+                log_fit, log_ok, None, False
+
+        # 3-5) 두 처방을 견주어 채택한다
+        # 제곱항은 단조 곡선도 근사하므로, '유의하지 않을 때만 로그'로 두면 로그가 맞는 경우에도 제곱항이 먼저 채택된다.
+        # 따라서 둘 다 검증을 통과하면 AIC가 낮은 쪽을 고른다
+        if sq_ok and log_ok : method = "square" if sq_fit.aic <= log_fit.aic else "log"
+        elif sq_ok:           method = "square"
+        elif log_ok:          method = "log"
+        else:                 method = None
+
+        if method == "square":
+            tmp, fit = sq_data, sq_fit
+            recipe[target] = {"method": "square", "center": center, "shift": None}
+            pending.remove(target)
+
+            history.append({
+                "라운드" : rnd, "변수" : target, "처방" : "제곱항",
+                "제곱항 p" : round(sq_p, 4), "검증 p": round(lr_p,4),
+                "AIC" : round(sq_fit.aic, 2), "채택" : True
+            })
+
+            if report:
+                print(f"    → 제곱항 채택 (제곱항 p = {sq_p:.4f}," 
+                      f"우도비 p = {lr_p:.4e}, AIC = {sq_fit.aic:.2f}")
+
+        elif method == "log":
+            tmp, fit = log_data, log_fit
+            recipe[target] = {"method": "log", "center" : None, "shift" : shift}
+            pending.remove(target)
+
+            history.append({
+                "라운드" : rnd, "변수" : target, "처방" : "로그변환",
+                "제곱항 p": round(sq_p, 4) if np.isfinite(sq_p) else np.nan,
+                "검증 p" : None,
+                "AIC" : round(log_fit.aic, 2), "채택" : True,
+            })
+
+            if report:
+                reason = "제곱항 기각" if not sq_ok else "AIC 우위"
+                print(f"    → 로그변환 채택 ({reason}, AIC = {log_fit.aic:.2f})")
+
+        # 3-6) 둘 다 실패: 원본을 그대로 두고 미해소로 기록한다
+        else:
+            unresolved.append(target)
+
+            history.append({
+                "라운드": rnd, "변수": target, "처방" : "미해소",
+                "제곱항 p": round(sq_p,4) if np.isfinite(sq_p) else np.nan,
+                "검증 p": none,
+                "AIC": round(fit.aic, 2), "채택": False,
+            })
+
+            if report:
+                print(f"    → 제곱항·로그변환 모두 기각 → 해결되지 않음")
+
+    # 4) 결과 정리
+    history_df = DataFrame(history)
+
+    if report:
+        print()
+        if not history_df.empty:
+            display(history_df.set_index("라운드"))
+
+        if unresolved:
+            print(f"⚠️ 미해소 변수: {unresolved}\n"
+                  f"    제곱항·로그변환으로 담기지 않는 형태이므로 "
+                  f"구간화나 스플라인이 필요하다는 신호입니다. 한계점으로 보고하세요.")
+
+    fit.data_ = tmp
+    fit.recipe_ = recipe
+    fit.history_ = history_df
+    fit.unresolved_ = unresolved
+
+    return fit
+
+# --------------------------------------------------------------------
+# 독립성 검정 함수 정의
+# --------------------------------------------------------------------
+def test_independent(fit):
+    """Durbin-Watson으로 잔차의 독립성을 검정한다.
+    
+    로지스틱 회귀는 잔차가 0/1 구조라 일반 잔차를 쓸 수 없으므로 **피어슨 잔차**를 사용한다.
+    본래 시계열 전용 검정이므로, 시간 순서가 없는 데이터에서는 통계량이 정상이어도
+    실제로는 독립이 아닐 수 있다. 최종 판단은 **자료 수집 설계**로 해야한다.
+    
+    Args:
+        fit: 'fit_model' 함수로 적합된 회귀분석 결과 객체.
+        
+    Returns:
+        DataFrame : Durbin-Watson 통계량과 독립성 판정을 담은 단일 행 결과표
+    """
+
+    # 1) Durbin-Watson으로 잔차의 독립성을 검정한다.
+    dw = float(durbin_watson(fit.resid_pearson))
+
+    # 2) DW값에 따른 독립성 판정 및 해석
+    if 1.5 <= dw <= 2.5:
+        independence = True
+        conclusion = "독립성 만족"
+    elif dw < 1.5:
+        independence = False
+        conclusion = "독립성 위반 (양(+)의 자기상관)"
+    else:
+        independence = False
+        conclusion = "독립성 위반 (음(-)의 자기상관)"
+
+    # 3) 단일 행 결과표 구성 및 출력
+    result_df = DataFrame([{
+            "statistic" : round(dw, 4),
+            "independence" : independence,
+            "result": conclusion,
+        }],
+        index=["Durbin-Watson"])
+
+    return result_df
+
+# --------------------------------------------------------
+# 로지스틱 회귀 파이프라인 함수 정의
+# --------------------------------------------------------
+def fit_pipeline(data, y, columns=None, *,
+                 # 1) 이상치 대체 (IQR 경계값, 행 삭제 없음)
+                 outlier=False,             # 이상치 대체 수행 여부
+                 # 2) 로짓 선형성 처방 재현
+                 recipe=None,               # fix_linear 이 확정한 처방 내역
+                 # 3) 더미변수 인코딩
+                 encode=True,               # 명목형 독립변수의 더미 인코딩 수행 여부
+                 # 4) 다중공선성 제거 (VIF)
+                 vif=False,                 # 다중공선성 제거 수행 여부
+                 vif_threshold=10.0,        # VIF 임계값
+                 # 5) 정규화
+                 scale = False,             # 정규화 수행 여부
+                 scale_method="standard",   # 사용할 스케일러 이름
+                 # 6) 모델 적합
+                 backward=False,            # 후진소거법 수행 여부
+                 alpha=0.05,                # 후진소거법의 변수 제거 기준 유의수준
+                 # --기타--
+                 name=None,                 # 모델을 구분할 이름. 결과 객체의 'name_' 속성이된다
+                 verbose=False):            # 단계별 전처리 내역 출력 여부
+    """플래그로 지정한 전처리를 수행한 뒤 로지스틱 회귀모델을 적합한다.
+    
+        Args:
+            data (DataFrame) : 독립변수 0/1 종속변수를 모두 포함하는 데이터프레임
+            y (str) : 종속변수로 사용할 컬럼명
+            outlier (bool) : 이상치를 대체 대상이 되는 원본 연속형 독립변수 목록
+            recipe (dict) : 'fix_linear' 이 돌려준 'recipe_'. None이면 처방을 적용하지 않는다 (기본값: None)
+            encode (bool) : 명목형 독립변수의 더미 인코딩 수행 여부 (기본값: True)
+            vif (bool) : 다중공선성 제거 수행 여부 (기본값: False)
+            vif_threshold (float) : VIF임계값 (기본값: 10.0)
+            """
