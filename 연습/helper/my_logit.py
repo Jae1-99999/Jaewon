@@ -1,11 +1,13 @@
 import numpy as np
 import seaborn as sb
-from pandas import DataFrame
+from pandas import DataFrame, concat
 from statsmodels.api import add_constant, Logit
 from IPython.display import display, Markdown
 from sklearn.metrics import confusion_matrix, roc_curve, roc_auc_score, accuracy_score, recall_score, precision_score, f1_score
 from . import my_plot
 from . import my_stats
+from . import my_prep
+from scipy.stats import chi2
 from statsmodels.stats.stattools import durbin_watson
 # --------------------------------------------------------------
 
@@ -823,7 +825,7 @@ def fix_linear(data, y, alpha=0.05, allow_shifted_log=False, max_rounds=None, re
             lr_p = float(1 - chi2.cdf(lr_stat, 1))  # 늘어난 모수는 제곱항 1개
             sq_ok = bool(sq_p < alpha and lr_p < alpha)
         except Exception:
-            sq_fit, sq_p, lr_p, sq_ok = None, np.nan, np.nanm False
+            sq_fit, sq_p, lr_p, sq_ok = None, np.nan, np.nanm, False
 
 
         # 3-4) 처방 ②: 로그 변환
@@ -966,6 +968,49 @@ def test_independent(fit):
 
     return result_df
 
+# -------------------------------------------------------
+# 처방된 데이터 재현 함수 정의
+# -------------------------------------------------------
+def apply_recipe(data, recipe):
+    """'fix_linear'이 확정한 처방을 다른 데이터프레임에 그대로 재현한다.
+    
+    학습 때 사용한 중심화 평균·평행이동량을 그대로 써야 하므로,
+    신규 데이터를 예측할 때는 반드시 이 함수로 파생변수를 만든다.
+    
+    Args:
+        data : 처방을 적용할 데이터프레임. 처방 대상 원본 컬럼 모두 포함해야한다.
+        recipe (dict): 'fix_linear'이 돌려준 'recipe_' 딕셔너리.
+            {변수명: {'method': 'square'|'log', 'center':float, 'shift': float}}
+            
+    Returns:
+        DataFrame : 파생변수가 추가되고 원본 컬림이 제거된 데이터프레임.
+        
+    Raises:
+        KeyError : 처방 대상 컬럼이 'data'에 없는 경우.
+        ValueError : 처방 방식이 'square'·'log'가 아닌 경우.
+    """
+    tmp = data.copy()
+
+    for col, rule in recipe.items():
+        if col not in tmp.columns:
+            raise KeyError(f"처방 대상 컬럼이 없습니다: '{col}'")
+
+        method = rule["method"]
+
+        if method == "square":
+            # 중심화 후 제곱 - 평균은 반드시 학습 때 값을 재사용한다
+            tmp[col + "_c"] = tmp[col] - rule["center"]
+            tmp[col + "_c2"] = tmp[col + "_c"] ** 2
+        elif method == "log":
+            #로그변환 - 평행이동량도 학습 때 값을 재사용한다
+            tmp[col + "_log"] = np.log(tmp[col] + rule["shift"])
+        else:
+            raise ValueError(f"지원하지 않는 처방 방식입니다: '{method}'")
+
+        tmp = tmp.drop(columns=[col])
+
+    return tmp
+
 # --------------------------------------------------------
 # 로지스틱 회귀 파이프라인 함수 정의
 # --------------------------------------------------------
@@ -998,4 +1043,289 @@ def fit_pipeline(data, y, columns=None, *,
             encode (bool) : 명목형 독립변수의 더미 인코딩 수행 여부 (기본값: True)
             vif (bool) : 다중공선성 제거 수행 여부 (기본값: False)
             vif_threshold (float) : VIF임계값 (기본값: 10.0)
-            """
+            scale (bool) : 정규화 수행 여부 (기본값 : False)
+            scale_method (str) : 사용할 스케일러 이름 (기본값: 'standard')
+            backward (bool) : 후진소거법 수행 여부 (기본값 : False)
+            alpha (float) : 후진소거법의 변수 제거 기준 유의수준 (기본값:0.05)
+            name (str) : 모델을 구분할 이름. 결과 객체의 'name_' 속성이 된다 (기본값 : None)
+            verbose (bool) : 단계별 전처리 내역 출력 여부 (기본값 : False)
+
+        Returns:
+            적합이 완료된 회귀분석 결과 객체. 아래 속성이 함께 붙는다.
+                - 'data_' (DataFrame) : 전처리가 끝난 데이터. 'report_variables' 등이 사용한다.
+                - 'recipe_' (dict) : 적용한 로짓 선형성 처방. 신규 예측 시 'apply_recipe'에 넘긴다
+                - 'name_' (str) : 모델을 구분할 이름
+
+        Raises:
+            KeyError : 종속변수 컬럼이 'data'에 없는 경우
+            ValueError : 결측치가 남아 있는 경우
+
+        """
+
+    # 1) 종속변수 확인 및 작업본 준비
+    if y not in data.columns:
+        raise KeyError(f"종속변수 '{y}'가 데이터프레임의 컬럼에 존재하지 않습니다.")
+
+    df = data.copy()        # 원본유지를 위한 복사본 작업
+
+    # 2) 이상치 대체 대상 확정
+    # 지정이 없으면 숫자형 독립변수를 자동 선택한다.
+    if columns is None:
+        columns = []
+        for c in df.select_dtypes(include="number").columns:
+            if c != y:
+                columns.append(c)
+
+    else:
+        missing = []
+        for c in columns:
+            if c not in df.columns:
+                missing.append(c)
+
+        if missing:
+            raise KeyError(f"데이터프레임에 존재하지 않는 컬럼입니다: {missing}")
+        
+    # 3) 이상치 대체 (IQR 경계값, 행 삭제 없음)
+    # -> 파생변수를 만들기 전에 원본 변수에 적용해야 곡선이 잘리지 않는다
+    if outlier and columns:
+        df = my_prep.replace_outlier(df, columns=columns, verbose=verbose)
+
+    # 4) 로짓 선형성 처방 재현 (중심화+제곱항 또는 로그변환)
+    if recipe:
+        df = apply_recipe(df, recipe)
+
+    # 5) 더미변수 인코딩 (명목형 독립변수가 있을 때만 동작한다)
+    if encode:
+        nominal_cols = []
+        for c in df.select_dtypes(include=["category", "object"]).columns:
+            if c != y:
+                nominal_cols.append(c)
+        
+        if nominal_cols:
+            df = my_prep.dummies(df, columns=nominal_cols, verbose=verbose)
+    # 현재 시점의 독립변수 목록 (파생변수·더미가 추가되었을 수 있다)
+    alive = [c for c in df.columns if c != y]
+
+    # 6) 다중공선성 제거 (VIF)
+    if vif:
+        df = my_prep.reduce_vif(df, columns=alive, threshold=vif_threshold, verbose=verbose)
+        alive = [c for c in df.columns if c != y]
+
+    # 7) 정규화
+    if scale:
+        df = my_prep.scaling(df, columns=alive, method=scale_method, verbose=verbose)
+
+    # 8) 결측치 점검
+    na_cols = list(df.columns[df.isna().any()])
+
+    if na_cols:
+        raise ValueError(f"결측치가 있는 컬럼이 있습니다: {na_cols}\n"
+                         f"데이터 품질 점검 단계에서 먼저 처리하세요.")
+    
+    # 9) 모델 적합 (backward=True이면 후진소거법 수행)
+    fit = auto_logit(df, y=y, backward=backward, alpha=alpha, report=False, plot=False)
+
+    # 10) 보고에 필요한 정보를 결과 객체에 붙여 반환
+    fit.data_ = df               # report_variables 등이 β·VIF 계산에 사용한다
+    fit.recipe_ = recipe or {}   # 신규 예측 시 apply_recipe에 그대로 넘긴다
+    fit.name_ = name            # compare_models가 채워주기도 한다.
+
+    return fit
+
+# ----------------------------------------------------------------------
+# 모델 성능 비교 함수 정의
+# ----------------------------------------------------------------------
+def compare_models(fits, metric="AUC", sub_metric="변수수", tolerance=0.05, threshold=0.5, digits=4, report=True):
+    """여러 로지스틱 모델의 분류 성능을 한 표로 정리해 좋은 순으로 정렬하고, 최고 모델을 반환한다.
+    주 지표 1위와의 격차가 tolerance 이내면 '근소 격차 그룹'으로 묶어 보조 지표로 순서를 정한다.
+    
+    'my_los.compare_models'와 같은 방식으로 동작하되, 회귀 지표(RMSE·R²) 대신
+    분류 지표(정확도·F1·AUC)와 모형 적합도 지표(Pseudo R²·AIC)로 비교한다.
+    
+    Args:
+        fits (dict): (모델이름: 적합된 회귀분석 결과 객체) 형태의 딕셔너리
+        metric (str): 정렬 기준이 되는 주 성능평가지표 (기본값: 'AUC')
+        sub_metric (str) : 근소 격차 그룹 안에서 적용할 보조 지표. None이면 미사용 (기본값: '변수수')
+        tolerance (float) : 근소 격차로 판단할 주 지표의 상대격차. 0이면 순수 크기 비교 (기본값: 0.05)
+        threshold (float) : 확률을 0/1로 분류하는 임계값 (기본값: 0.5)
+        digits (int) : 표에 표시할 소수점 자릿수 (기본값: 4)
+        report (bool) : 성능 비교표를 화면에 출력할지 여부 (기본값 : True)
+        
+    Returns:
+        성능이 가장 좋은 모델의 회귀분석 결과 객체(표의 첫 행). 아래 속성이 함께 붙는다.
+            - 'name_' (str): 모델이름. 'fits'의 키에서 채워진다
+            - 'score_table_' (DataFrame) : 모델명을 인덱스로 하는 성능 비교표
+                성능이 좋은 모델이 위에 오며, 맨 끝에 1위 대비 상대격차인 'Gap(%)' 컬럼이 붙는다
+                
+    Raises:
+        TypeError : 'fits'가 딕셔너리가 아니거나 값이 회귀분석 결과 객체가 아닌 경우.
+        ValueError : 'fits'가 비었거나 지표 이름·tolerance·threshold가 유효하지 않은 경우
+    """
+    # 1) 지표별 '성능이 좋은 방향' 정의 (True = 값이 클수록 좋음)
+    metrics = {
+        "변수수" : False,       # 같은 성능이라면 변수가 적은 모델이 간명하다
+        "정확도" : True,
+        "정밀도" : True,
+        "재현율" : True,
+        "F1" : True,
+        "AUC" : True,
+        "Pseudo R²" : True,
+        "AIC" : False,
+    }
+
+    # 2) 입력 검증
+    if not isinstance(fits, dict):
+        raise TypeError(f"fits는 딕셔너리여야 합니다: {type(fits).__name__}")
+
+    if not fits:
+        raise ValueError("비교할 모델이 없습니다.")
+
+    for name, fit in fits.items():
+        if not hasattr(fit, "prsquared"):
+            raise TypeError(f"'{name}'의 값이 로지스틱 회귀분석 결과 객체가 아닙니다: "
+                            f"{type(fit).__name__}")
+
+    for m in [metric, sub_metric]:
+        if m is not None and m not in metrics:
+            raise ValueError(f"지원하지 않는 지표입니다: '{m}' "
+                             f"(사용 가능: {list(metrics.keys())})")
+    
+    if tolerance < 0 :
+        raise ValueError(f"tolerance는 0 이상이어야 합니다: {tolerance}")
+
+    if not 0 < threshold < 1:
+        raise ValueError(f"threshold는 0과 1 사이여야 합니다 : {threshold}")
+    
+    # 3) 모델별 성능지표 계산
+    result = []
+
+    for name, fit in fits.items():
+        y_true = np.asarray(fit.model.endog).astype(int)        # 실제 종속변수(0/1)
+        proba = np.asarray(fit.predict())                       # 1이 될 확률
+        y_pred = (proba > threshold).astype(int)                # 임계값 기준 예측 범주
+
+        result.append({
+            "모델" : name,
+            "변수수" : int(fit.df_model),                       # 상수항을 제외한 독립변수 개수
+            "정확도" : accuracy_score(y_true, y_pred),
+            "정밀도" : precision_score(y_true, y_pred, zero_division=0),
+            "재현율" : recall_score(y_true, y_pred, zero_division=0),
+            "F1" : f1_score(y_true, y_pred, zero_division=0),
+            "AUC" : roc_auc_score(y_true, proba),
+            "Pseudo R²" : fit.prsquared,
+            "AIC" : fit.aic,
+        })
+
+    rdf = DataFrame(result).set_index("모델")
+
+    # 4) 1위 대비 주 지표의 상대격차 계산
+    # 지표마다 좋은 방향이 다르므로 metrics에 기록해 둔 방향으로 최적값을 찾는다
+    higher_is_better = metrics[metric]
+
+    if higher_is_better:
+        best = rdf[metric].max()
+        diff = best - rdf[metric]       # 클수록 좋은 지표는 1위보다 작을수록 나쁘다
+    else:
+        best = rdf[metric].min()
+        diff = rdf[metric] - best       # 작을수록 좋은 지표는 1위보다 클수록 나쁘다
+
+    # AIC처럼 값이 음수인 지표도 있으므로 최적값의 절댓값을 분모로 삼는다.
+    # 최적값이 0이면 나눌 수 없으므로 격차를 값의 차이 그대로 본다
+    if best != 0:
+        denominator = abs(best)
+    else:
+        denominator = 1.0
+
+    rdf["Gap(%)"] = (diff / denominator * 100).round(2)     # 양수일수록 1위보다 나쁨
+
+    # 5) 근소 격차 그룹을 먼저 정렬하고 나머지를 뒤에 붙인다
+    # 주 지표가 사실상 비슷한(격차가 tolerance 이내인) 모델끼리는 보조 지표로 순서를 정한다
+    close = rdf["Gap(%)"] <= tolerance * 100
+
+    by = [metric]
+    ascending = [not higher_is_better]
+
+    if sub_metric:
+        # 보조 지표를 앞에 두어야 근소 격차 그룹 안에서 우선 적용된다
+        by.insert(0, sub_metric)
+        ascending.insert(0, not metrics[sub_metric])
+
+    front = rdf[close].sort_values(by=by, ascending=ascending)
+    back = rdf[~close].sort_values(by=[metric], ascending=[not higher_is_better])
+
+    score_table = concat([front, back]).round(digits)
+
+    # 6) 성능표 
+    if report:
+        display(score_table)
+
+    # 각 모델에 딕셔너리 키를 이름으로 새겨 둔다 (직접 지정한 name_이 없을 때만)
+    for model_name, fit in fits.items():
+        if getattr(fit, "name_", None) is None:
+            fit.name_ = model_name
+
+    # 표는 성능순으로 정렬되어 있으므로 첫 행이 곧 최고 모델이다
+    best = fits[score_table.index[0]]
+    best.score_table_ = score_table
+
+    return best
+
+# ------------------------------------------------------------------------------
+# 임계값 비교 함수 정의
+# ------------------------------------------------------------------------------
+def report_threshold(fit, thresholds=None, digits=3):
+    """임계값을 바꿔가며 분류 성능이 어떻게 달라지는지 한 표로 정리한다.
+    
+    임계값 0.5는 관례일 뿐이므로, 정밀도와 재현율 중 무엇이 중요한지에 따라
+    조정한 결과를 비교해 목적에 맞는 값을 고르는 데 사용한다.
+    
+    Args:
+        fit: 'fit_model' 함수로 적합된 회귀분석 결과 객체.
+        thresholds (list): 비교할 임계값 목록 (기본값: [0.3, 0.4, 0.5, 0.6, 0.7])
+        digits (int) : 표에 표시할 소수점 자릿수 (기본값: 3)
+        report (bool) : 비교표를 화면에 출력할지 여부 (기본값: True)
+        
+    Returns:
+        DataFrame: 임계값을 인덱스로 하는 성능 비교표
+            정확도·정밀도·재현율·F1과 놓친 1(FN)·잘못 잡은 0(FP) 건수를 담는다.
+            
+    Raises:
+        ValueError: 임계값 목록이 비었거나 0~1 범위를 벗어난 값이 있는 경우.
+    """
+
+    # 1) 입력 검증
+    if thresholds is None:
+        thresholds = [0.3, 0.4, 0.5, 0.6, 0.7]
+
+    if not len(thresholds):
+        raise ValueError("비교할 임계값이 없습니다.")
+
+    for t in thresholds:
+        if not 0 < t < 1:
+            raise ValueError(f"임계값은 0과 1 사이여야 합니다: {t}")
+        
+    # 2) 실제값·예측확률 준비
+    y_true = np.asarray(fit.model.endog).astype(int)        # 실제 종속변수(0/1)
+    proba = np.asarray(fit.predict())                       # 1이 될 확률
+
+    # 3) 임계값별 성능 계산
+    rows = []
+
+    for t in thresholds:
+        y_pred = (proba > t).astype(int)                    # 임계값 t로 이진화
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+
+        rows.append({
+            "임계값" : t,
+            "정확도" : accuracy_score(y_true, y_pred),
+            "정밀도" : precision_score(y_true, y_pred, zero_division=0),
+            "재현율" : recall_score(y_true, y_pred, zero_division=0),
+            "F1" : f1_score(y_true, y_pred, zero_division=0),
+            "놓친 1(FN)": int(fn),              # 임계값을 올릴수록 늘어난다
+            "잘못 잡은 0(FP)" : int(fp),        # 임계값을 내릴수록 늘어난다
+        })
+
+    result = DataFrame(rows).set_index("임계값").round(digits)
+
+    return result
+
