@@ -2,10 +2,16 @@ from pandas import DataFrame
 from . import my_prep
 from . import my_plot
 from . import RANDOM_STATE
+<<<<<<< HEAD
 import numpy as np
 
 # 군집분석 관련 참조
 from sklearn.cluster import KMeans, KneeLocator, silhouette_samples, visualize_silhouette
+=======
+
+# 군집분석 관련 참조
+from sklearn.cluster import KMeans
+>>>>>>> 83cad2927e5ca90417eb682ddb7eee3667e0bcd3
 
 
 # -----------------------------------------------------
@@ -171,6 +177,7 @@ def best_k_elbow(data, klist=None, columns=None, scaling='standard', sensitivity
 
     # 1) k를 눌러 가며 이너셔 수집
     inertia = []
+<<<<<<< HEAD
 
     for k in klist:
         estimator = KMeans(n_clusters=k, random_state=random_state, n_init=n_init)
@@ -376,3 +383,12 @@ def best_k(data, klist=None, columns=None, scaling='standard', sensitivity=0.01,
         print("    (지표는 후보를 좁혀줄 뿐이므로, 목적과 도메인 지식으로 한 번 더 확인할 것)")
         
     return final_k, result_df
+=======
+    # 2) k가 1 늘어날 때마다 이너셔가 얼마나 줄었는지 계산
+
+    # 3) 결과 정리
+
+    # 4) 엘보우 포인트 찾기
+
+    # 5) 시각화
+>>>>>>> 83cad2927e5ca90417eb682ddb7eee3667e0bcd3
