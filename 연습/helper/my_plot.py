@@ -383,7 +383,7 @@ def stackplot(data, x, y, hue, aggfunc=np.sum, orient='v', ratio=False,
 
 def scatterplot(data, x, y, hue=None, marker='o', color=None, size=100, edgecolor="#ffffff",
                 linewidth=1.5, alpha=1, palette=None, title=None, outline=True,
-                xlabel=None, ylabel=None, width=1280, height=640, save_path=None, ax=None):
+                xlabel=None, ylabel=None, width=1280, height=640, save_path=None, ax=None, **params):
     
     # 그래프 초기화
     fig = None
@@ -404,7 +404,7 @@ def scatterplot(data, x, y, hue=None, marker='o', color=None, size=100, edgecolo
     sb.scatterplot(data=data, x=x, y=y,
                    hue=hue, color=color, palette=palette,
                    marker=marker, s=size, edgecolor=edgecolor,
-                   linewidth=linewidth, alpha=alpha, ax=ax)
+                   linewidth=linewidth, alpha=alpha, ax=ax, **params)
 
     # 외곽선 그리기
     if outline and hue is not None:
