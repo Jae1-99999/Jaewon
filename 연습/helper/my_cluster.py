@@ -586,67 +586,75 @@ def best_k_silhouette(data, klist=None, columns=None, scaling='standard', random
 # ---------------------------------------------------------------
 # 자동 최적 k 탐색 함수
 # ---------------------------------------------------------------
-def best_k(data, klist=None, columns=None, scaling='standard', sensitivity=0.01, random_state=RANDOM_STATE, n_init=10, verbose=True,
+def best_k(data, klist=None, columns=None, scaling='standard',
+           sensitivity=0.01, random_state=RANDOM_STATE, n_init=10, verbose=True,
            plot=True, plot_each=False, title=None, width=1280, height=640):
-    """엘보우 포인트와 실루엣 균형지수를 함께 평가해 최적의 k를 결정하는 함수
+    """엘보우 포인트와 실루엣 균형지수를 함께 확인해 최종 k를 결정하는 함수
     
-    Args (기본값은 위의 함수 정의 참고) : 
-        data, klist : 군집화할 데이터, 확인할 k 목록(None이면 2~10)
-        columns, scaling, random_state : 사용할 컬럼(None이면 수치형 전체),
+    Args (기본값은 위의 함수 정의 참고):
+        data, klist: 군집화할 데이터, 확인할 k 목록(None이면 2~10)
+        columns, scaling, random_state: 사용할 컬럼(None이면 수치형 전체),
             스케일러 이름(None이면 원본 값), 중심점의 초기 위치를 결정하는 랜덤시드
         n_init: 시작 위치를 바꿔 가며 시도할 횟수 (k끼리 공정하게 비교하려면 1회로는 부족하다)
-        sensitivity : KneeLocator의 민감도(S). 작을수록 작은 꺾임에도 반응한다
-        verbose, plot, plot_each, title : 계산 결과 출력 여부,
+        sensitivity: KneeLocator의 민감도(S). 작을수록 작은 꺾임에도 반응한다
+        verbose, plot, plot_each, title: 판단 과정 출력 여부, 시각화 여부,
             k마다 실루엣 막대·산점도를 그릴지 여부, 그래프 제목(None이면 자동 생성)
-        width, height : 그래프 한 칸의 가로·세로 픽셀
+        width, height: 캔버스 한 칸의 가로·세로 픽셀
         
     Returns:
-        tuple : (best_k, result_df) - 최종 선택한 k, 
-            k별 스코어·전체면적·두께비·최소상대면적·균형지수가 담긴 데이터프레임
+        tuple: (best_k, result_df) - 최종 선택한 k,
+            k별 이너셔·감소량·실루엣 지표를 한 표로 합친 데이터프레임
     """
-    # 1) 스케일링을 한 번만 수행한 뒤 두 함수에 같은 데이터를 넘긴다
+    # --- 1) 스케일링을 한 번만 수행한 뒤 두 함수에 같은 데이터를 넘긴다 ---
     df, klist = _prepare_k_search(data, klist, columns, scaling, verbose)
-
-    # 2) 두 지표를 각각 계산
-    elbow_k, elbow_df = best_k_elbow(df, klist=klist, scaling=None, sensitivity=sensitivity, random_state=random_state, n_init=n_init, verbose=False,
-                                     plot=plot, width=width, height=height)
-
-    sil_k, sil_df = best_k_silhouette(df, klist=klist, scaling=None, random_state=random_state, n_init=n_init, verbose=False,
-                                   plot=plot, plot_each=plot_each, width=width, height=height)
     
-    # 3) 두 결과를 한 표로 합치기
+    # --- 2) 두 지표를 각각 계산 ---
+    elbow_k, elbow_df = best_k_elbow(df, klist=klist, scaling=None,
+                                     sensitivity=sensitivity,
+                                     random_state=random_state,
+                                     n_init=n_init, verbose=False, plot=plot,
+                                     width=width, height=height)
+                                     
+    sil_k, sil_df = best_k_silhouette(df, klist=klist, scaling=None,
+                                      random_state=random_state, n_init=n_init,
+                                      verbose=False, plot=plot, plot_each=plot_each,
+                                      width=width, height=height)
+                                      
+    # --- 3) 두 결과를 한 표로 합치기 ---
     result_df = elbow_df.merge(sil_df, on='k')
-
-    # 4) 최종 판단
+    
+    # --- 4) 최종 판단 ---
     final_k = sil_k # 엘보우는 뭉침만 보므로 후보 제시용, 최종 결정은 분리와 균형까지 보는 실루엣이 맡는다
-
+    
     if verbose:
         # 두 지표가 가리키는 k와 지표값을 함께 출력해 비교한다
         sil_row = sil_df[sil_df['k'] == sil_k].iloc[0]
-        elbow_row = elbow_df[sil_df['k'] == elbow_k]
-
-        print(f"[1단계] 엘보우 포인트    : k = {elbow_k}   (뭉침만 확인 → 후보)")
-        print(f"[2단계] 실루엣 균형지수  : k = {sil_k}  (뭉침 + 분리 + 크기 균형)")
+        elbow_row = sil_df[sil_df['k'] == elbow_k]
+        
+        print(f"[1단계] 엘보우 포인트   : k = {elbow_k}  (뭉침만 확인 -> 후보)")
+        print(f"[2단계] 실루엣 균형지수 : k = {sil_k}  (뭉침 + 분리 + 크기 균형)")
         print('-' * 60)
-
-        # 두 지표가 같은 k를 가리키는지 여부에 따라 최종선택을 안내한다.
+        
+        # 두 지표가 같은 k를 가리키는지 여부에 따라 최종 선택을 안내한다
         if elbow_k == sil_k:
             print("두 지표가 같은 k를 가리키므로 그대로 확정합니다.")
         else:
             print("두 지표가 다른 k를 가리킵니다.")
-
+            
             if not elbow_row.empty:
-                print(f"   · k = {elbow_k} : 균형지수 {elbow_row.iloc[0]['균형지수']}"
-                      f" (스코어 {elbow_row.iloc[0]['스코어']}, 두께비 {elbow_row.iloc[0]['두께비']})")
-
-            print(f"   · k = {sil_k} : 균형지수 {sil_row['균형지수']}"
+                print(f"  · k = {elbow_k} : 균형지수 {elbow_row.iloc[0]['균형지수']} "
+                      f"(스코어 {elbow_row.iloc[0]['스코어']}, 두께비 {elbow_row.iloc[0]['두께비']})")
+                      
+            print(f"  · k = {sil_k} : 균형지수 {sil_row['균형지수']} "
                   f"(스코어 {sil_row['스코어']}, 두께비 {sil_row['두께비']})")
-
+                  
         print('-' * 60)
         print(f">>> 최종 선택: k = {final_k}")
         print("    (지표는 후보를 좁혀줄 뿐이므로, 목적과 도메인 지식으로 한 번 더 확인할 것)")
         
     return final_k, result_df
+
+
 
 # ===================================================================
 # 덴드로그램 재료 — 계층적 군집이 합쳐온 과정을 그림용 표로 바꾼다
