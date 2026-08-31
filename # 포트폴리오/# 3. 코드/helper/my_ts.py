@@ -853,7 +853,7 @@ def auto_correlation(data, column=None, period=None, plot=True,
         lags = max(min(3 * period, limit), 2 * period)
 
     # 3) 계수 계산 (lag 0은 자기 자신이므로 제외)
-    acf_values = acf(data, nalags=lags)[1:]
+    acf_values = acf(data, nlags=lags)[1:]
     pacf_values = pacf(data, nlags=lags)[1:]
 
     # 유의성 기준값: 2 / sqrt(N). 관측치가 많을수록 작아진다.
@@ -892,7 +892,7 @@ def auto_correlation(data, column=None, period=None, plot=True,
 
     # 계절 차수 : 주기의 배수(period, 2*period ...)만 골라 같은 규칙을 적용한다
     # 세는 단위가 1시차에서 1주기로 바뀔 뿐이다.
-    season_lags = list(range[period, lags + 1, period]) if period else []
+    season_lags = list(range(period, lags + 1, period)) if period else []
 
     Q = __cut_off(result_df.loc[season_lags, "acf 유의성"]) if season_lags else 0
     P = __cut_off(result_df.loc[season_lags, "pacf 유의성"]) if season_lags else 0
