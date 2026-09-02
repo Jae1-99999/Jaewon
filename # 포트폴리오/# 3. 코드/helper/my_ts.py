@@ -3,6 +3,7 @@ from pandas import DataFrame, Series, Grouper, concat, to_datetime
 from IPython.display import display, Markdown
 from itertools import product
 import warnings
+import pandas as pd
 
 from . import my_plot
 # 정상성 검정 · 자기상관 계수 계산
@@ -1384,3 +1385,196 @@ def report_score(fit, name="적합값", report=True):
               f"기준선 대비 {abs(gap):.1f}% {'개선' if gap > 0 else '악화'}")
 
     return result
+
+# ============================================================================
+"""시계열 파생 피처(lag, 이동평균, 캘린더 피처)가 실제로
+"예측 시점에 사용 가능한 값"인지 교차검증하는 재사용 모듈.
+
+포함 함수
+1) check_lag_feature        : lag_N 피처가 shift(N)과 정확히 일치하는지 확인
+2) check_moving_average     : 이동평균 피처가 후행(trailing)인지 중심(centered)인지 판별 (leakage 여부)
+3) check_calendar_feature   : 캘린더 파생 피처가 datetime으로부터 재계산한 값과 일치하는지 확인
+4) run_all_checks           : 위 3개를 한 번에 실행하고 결과를 dict로 반환 + 콘솔 출력
+
+사용 예시는 파일 맨 아래 __main__ 블록 참고.
+"""
+
+# ------------------------------------------------------------------
+# 1. Lag 피처 검증
+# ------------------------------------------------------------------
+def check_lag_feature(df: pd.DataFrame, target_col: str, lag_col: str,
+                       lag_periods: int, tol: float = 1e-6, verbose: bool = True) -> dict:
+    """
+    lag_col이 target_col.shift(lag_periods)와 일치하는지 확인.
+
+    Parameters
+    ----------
+    df : DataFrame (시간순 정렬되어 있어야 함)
+    target_col : 원본 타겟 컬럼명 (예: 'load_demand_MW')
+    lag_col : 검증할 lag 피처 컬럼명 (예: 'lag_1_hour_load')
+    lag_periods : 몇 스텝 lag인지 (예: 1시간 lag=1, 1일 lag=24)
+    tol : 허용 오차 (부동소수점 오차 감안)
+
+    Returns
+    -------
+    dict : {'is_valid': bool, 'n_mismatch': int, 'mean_abs_error': float}
+    """
+    expected = df[target_col].shift(lag_periods)
+    diff = (df[lag_col] - expected).abs()
+
+    # 앞쪽 lag_periods 개 행은 원래 NaN이 되는 게 정상이므로 검증에서 제외
+    diff_valid_region = diff.iloc[lag_periods:]
+    n_mismatch = int((diff_valid_region > tol).sum())
+    mean_abs_error = float(diff_valid_region.mean())
+    is_valid = n_mismatch == 0
+
+    if verbose:
+        status = "✅ 사용 가능 (shift와 정확히 일치, leakage 없음)" if is_valid \
+            else "⚠️ 불일치 발견 - 실제 계산 방식 확인 필요"
+        print(f"[lag 검증] {lag_col} (lag={lag_periods}) -> {status}")
+        print(f"           mismatch 개수={n_mismatch}, 평균절대오차={mean_abs_error:.6f}")
+
+    return {"feature": lag_col, "is_valid": is_valid,
+            "n_mismatch": n_mismatch, "mean_abs_error": mean_abs_error}
+
+
+# ------------------------------------------------------------------
+# 2. 이동평균 피처 검증 (leakage 핵심 체크)
+# ------------------------------------------------------------------
+def check_moving_average(df: pd.DataFrame, target_col: str, ma_col: str,
+                          window: int, tol: float = 1e-6, verbose: bool = True) -> dict:
+    """
+    ma_col이 '후행(trailing)' 이동평균인지 '중심(centered)' 이동평균인지 판별.
+
+    - trailing: t 시점까지 과거 window개 값의 평균 -> 예측 시점에 사용 가능 (안전)
+    - centered: t 시점 앞뒤로 window개 값의 평균 -> 미래 값을 포함 -> LEAKAGE (사용 불가)
+
+    Returns
+    -------
+    dict : {'feature', 'type', 'is_safe_to_use', 'mean_abs_error_trailing', 'mean_abs_error_centered'}
+    """
+    trailing = df[target_col].rolling(window).mean()
+    centered = df[target_col].rolling(window, center=True).mean()
+
+    err_trailing = float((df[ma_col] - trailing).abs().mean(skipna=True))
+    err_centered = float((df[ma_col] - centered).abs().mean(skipna=True))
+
+    if err_trailing < tol:
+        ma_type, is_safe = "trailing", True
+    elif err_centered < tol:
+        ma_type, is_safe = "centered", False
+    else:
+        ma_type, is_safe = "unknown", False  # 둘 다 아니면 계산식 자체를 재확인해야 함
+
+    if verbose:
+        if ma_type == "trailing":
+            msg = " 후행(trailing) 이동평균 -> 예측 시점에 사용 가능"
+        elif ma_type == "centered":
+            msg = " 중심(centered) 이동평균 -> 미래 값 포함, LEAKAGE! 그대로 쓰면 안 됨"
+        else:
+            msg = " trailing/centered 둘 다 아님 -> 실제 계산 로직을 별도 확인 필요"
+        print(f"[이동평균 검증] {ma_col} (window={window}) -> {msg}")
+        print(f"                trailing과의 오차={err_trailing:.6f}, centered와의 오차={err_centered:.6f}")
+
+    return {"feature": ma_col, "type": ma_type, "is_safe_to_use": is_safe,
+            "mean_abs_error_trailing": err_trailing, "mean_abs_error_centered": err_centered}
+
+
+# ------------------------------------------------------------------
+# 3. 캘린더 피처 정합성 검증
+# ------------------------------------------------------------------
+def _get_datetime_series(df: pd.DataFrame, datetime_col: str = None) -> pd.Series:
+    """
+    datetime_col이 주어지면 해당 컬럼을, None이면 df.index(DatetimeIndex)를
+    Series 형태로 반환. datetime이 컬럼이든 인덱스든 동일하게 동작하게 하기 위한 헬퍼.
+    """
+    if datetime_col is not None:
+        return df[datetime_col]
+    if isinstance(df.index, pd.DatetimeIndex):
+        return df.index.to_series(index=df.index)
+    raise KeyError(
+        "datetime_col을 지정하지 않았는데 df.index도 DatetimeIndex가 아닙니다. "
+        "datetime_col='컬럼명'을 넘기거나 df.index를 DatetimeIndex로 설정하세요."
+    )
+
+
+def check_calendar_feature(df: pd.DataFrame, datetime_col: str, feature_col: str,
+                            recompute_fn, verbose: bool = True) -> dict:
+    """
+    feature_col(예: hour_of_day)이 datetime으로부터 다시 계산한 값과 일치하는지 확인.
+
+    Parameters
+    ----------
+    datetime_col : datetime이 들어있는 컬럼명. None이면 df.index(DatetimeIndex)를 사용.
+    recompute_fn : datetime Series -> 재계산된 Series를 반환하는 함수
+                   예: lambda s: s.dt.hour
+    """
+    dt_series = _get_datetime_series(df, datetime_col)
+    recomputed = recompute_fn(dt_series)
+    recomputed.index = df.index  # 인덱스 정렬 맞추기
+    mismatch_mask = df[feature_col].astype(str) != recomputed.astype(str)
+    n_mismatch = int(mismatch_mask.sum())
+    is_valid = n_mismatch == 0
+
+    if verbose:
+        status = " 일치" if is_valid else f"⚠️ 불일치 {n_mismatch}건 - 정의 재확인 필요"
+        print(f"[캘린더 피처 검증] {feature_col} -> {status}")
+        if n_mismatch > 0:
+            sample = df.loc[mismatch_mask, [datetime_col, feature_col]].head(3)
+            print(f"                예시 불일치 케이스:\n{sample}")
+
+    return {"feature": feature_col, "is_valid": is_valid, "n_mismatch": n_mismatch}
+
+
+# ------------------------------------------------------------------
+# 4. 한 번에 실행하는 통합 함수
+# ------------------------------------------------------------------
+def run_all_checks(df: pd.DataFrame, target_col: str = "load_demand_MW",
+                    datetime_col: str = None) -> dict:
+    """
+    이 프로젝트(power_system_load_dataset)에 맞춘 기본 체크셋을 한 번에 실행.
+    다른 데이터셋에 쓸 때는 lag_specs / calendar_specs만 바꿔주면 됨.
+    """
+    results = {"lag": [], "moving_average": [], "calendar": []}
+
+    print("=" * 70)
+    print("A. Lag 피처 검증")
+    print("=" * 70)
+    lag_specs = [("lag_1_hour_load", 1), ("lag_1_day_load", 24)]
+    for col, periods in lag_specs:
+        if col in df.columns:
+            results["lag"].append(check_lag_feature(df, target_col, col, periods))
+
+    print("\n" + "=" * 70)
+    print("B. 이동평균 피처 검증")
+    print("=" * 70)
+    if "moving_avg_7_day" in df.columns:
+        results["moving_average"].append(
+            check_moving_average(df, target_col, "moving_avg_7_day", window=24 * 7)
+        )
+
+    print("\n" + "=" * 70)
+    print("C. 캘린더 피처 정합성 검증")
+    print("=" * 70)
+    calendar_specs = [
+        ("day_of_week", lambda s: s.dt.dayofweek),
+        ("hour_of_day", lambda s: s.dt.hour),
+        ("month", lambda s: s.dt.month),
+        ("year", lambda s: s.dt.year),
+        ("week_of_year", lambda s: s.dt.isocalendar().week.astype(int)),
+    ]
+    for col, fn in calendar_specs:
+        if col in df.columns:
+            results["calendar"].append(check_calendar_feature(df, datetime_col, col, fn))
+
+    # 요약
+    print("\n" + "=" * 70)
+    print("요약: 사용 불가(leakage/불일치) 피처 목록")
+    print("=" * 70)
+    unsafe = [r["feature"] for r in results["lag"] if not r["is_valid"]]
+    unsafe += [r["feature"] for r in results["moving_average"] if not r["is_safe_to_use"]]
+    unsafe += [r["feature"] for r in results["calendar"] if not r["is_valid"]]
+    print(unsafe if unsafe else "없음 - 모든 피처 사용 가능")
+
+    return results
+
